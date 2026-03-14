@@ -49,6 +49,8 @@ dependencies {
 
     implementation("com.google.mlkit:translate:17.0.3")
 
+    implementation("com.google.android.material:material:1.13.0")
+
     implementation("com.google.android.gms:play-services-location:21.3.0")
 
     implementation(libs.androidx.core.ktx)

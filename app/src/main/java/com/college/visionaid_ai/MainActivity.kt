@@ -8,6 +8,7 @@ import  android.speech.tts.TextToSpeech
 import java.util.*
 
 import android.Manifest
+import android.adservices.adid.AdId
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -37,8 +38,11 @@ import android.graphics.*
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.ContactsContract
 import android.speech.RecognizerIntent
 import android.util.Log
 import android.view.MotionEvent
@@ -51,6 +55,7 @@ import android.widget.ToggleButton
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
+import com.google.android.material.switchmaterial.SwitchMaterial
 import org.w3c.dom.Text
 
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -58,6 +63,10 @@ import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.common.model.DownloadConditions
+
+import android.speech.SpeechRecognizer
+import kotlinx.coroutines.flow.SharingCommand
+import java.util.Locale
 
 
 @OptIn(androidx.camera.core.ExperimentalGetImage::class)
@@ -91,12 +100,21 @@ class MainActivity : AppCompatActivity() {
     private var isSpeechEnabled = true
     private var allowListning = true
 
+    private var voiceMode = "normal"
+
+    private var ListenMode = "none"
+
+    private lateinit var btnbot: ImageButton
+
     private lateinit var translator: Translator
     private var selectedLanguageCode = TranslateLanguage.HINDI
 
     private lateinit var speechLauncher: ActivityResultLauncher<Intent>
 
     private fun speak(text: String){
+
+        val params = Bundle()
+        val utteraneId = "tts1"
         textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
     }
 
@@ -106,8 +124,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        val toggleSpeech = findViewById<ToggleButton>(R.id.toggleSpeech)
-        val toggleVibration = findViewById<ToggleButton>(R.id.toggleVibration)
+        val toggleSpeech = findViewById<SwitchMaterial>(R.id.toggleSpeech)
+        val toggleVibration = findViewById<SwitchMaterial>(R.id.toggleVibration)
         val seekDistance = findViewById<SeekBar>(R.id.seekDistance)
         val tvDistanceLabel = findViewById<TextView>(R.id.tvDistanceLabel)
 
@@ -179,37 +197,33 @@ class MainActivity : AppCompatActivity() {
                 isListening = false
                 isDetectionEnabled = true
 
-                if (result.resultCode == RESULT_OK){
-                    val command = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.get(0)
-                }
-
                 val resultList = result.data?.getStringArrayListExtra(
                     RecognizerIntent.EXTRA_RESULTS
                 )
 
-                val locationName = resultList?.get(0)
+                val locationName = resultList?.get(0)?.lowercase()
 
-                if (locationName != null){
+                if (locationName != null){0
                     speak("Navigating to $locationName")
                     openNavigation(locationName)
+                } else {
+                    speak("Location not recognized")
                 }
             }
-
         }
         getCurrentLocation()
 
-        // mic listening code
-
-
-        // Start automatic listening when app opens
-        startListening()
-
         val micButton = findViewById<ImageButton>(R.id.btnMic)
+
+        startListening()
 
         //mic button manual control
         micButton.setOnClickListener {
+            isListening = true
             allowListning = true
             speak("Voice command activated. please say your destination")
+
+            // Start automatic listening when app opens
             startListening()
         }
 
@@ -232,11 +246,54 @@ class MainActivity : AppCompatActivity() {
             showLanguageDialog()
         }
 
-        //Permission code
+        // Bot listening button
+        btnbot = findViewById<ImageButton>(R.id.btnbot)
 
-        if (allPermissionGranted()) {
+        btnbot.setOnClickListener {
+
+            speak("Listening to command")
+            startVoiceCommand()
+        }
+
+        // voice search permission code
+
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.CALL_PHONE
+            ),1
+        )
+
+        // voice permission launcher
+       speechLauncher  = registerForActivityResult (ActivityResultContracts.StartActivityForResult()) {
+            result ->
+
+            if (result.resultCode == RESULT_OK) {
+
+                val data = result.data
+                val result =
+                    data?.getStringArrayListExtra((RecognizerIntent.EXTRA_RESULTS))
+
+                val command = result?.get(0)?.lowercase()
+
+                processVoiceCommand(command)
+            }
+        }
+
+        //Camera Permission Granted code
+
+        if (ContextCompat.checkSelfPermission(
+            this, Manifest.permission.CAMERA
+        )== PackageManager.PERMISSION_GRANTED
+        ) {
             startCamera()
-        } else {
+        }
+
+        /*if (allPermissionGranted()) {
+            startCamera()
+        }*/ else {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
         }
 
@@ -264,7 +321,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        speak("Navigation started. To return , press the home button and reopen VisionAid ai")
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
@@ -281,6 +337,250 @@ class MainActivity : AppCompatActivity() {
 
         }
         return super.dispatchTouchEvent(ev)
+    }
+
+    // Voice Listening Function
+
+    private fun startVoiceCommand(){
+
+        allowListning = true
+
+        if(!allowListning){
+            speak("Listening is not working")
+            return
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+
+        intent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        )
+
+        intent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE,
+            Locale.getDefault()
+        )
+
+        intent.putExtra(
+            RecognizerIntent.EXTRA_PROMPT, "Speak now"
+        )
+
+        speechLauncher.launch(intent)
+    }
+
+    // Voice Command process
+
+    private fun processVoiceCommand(command: String?) {
+
+
+        if (command == null) {
+            speak("command not recognized")
+            return
+        }
+
+        val text = command.lowercase()
+
+        // step 1: if we are waiting for contact name
+        if (voiceMode == "call") {
+
+            voiceMode = "normal"
+
+            val name = text
+                .replace("call", "")
+                .replace("whatsapp", "")
+                .trim()
+
+            callContact(name)
+
+            return
+        }
+
+        // step 2: if we are waiting for whatsapp call
+        if (voiceMode == "whatsapp"){
+
+            voiceMode = "normal"
+
+            val name = text.replace("call","").trim()
+
+            callWhatsApp(name)
+
+            return
+        }
+
+        // step 3 : if we are waiting for YouTube search
+        if (voiceMode == "youtube"){
+
+            voiceMode = "normal"
+
+            searchYoutuve(text)
+
+            return
+        }
+
+        when {
+
+            text.contains("whatsapp") && text.contains("whatsapp call") -> {
+
+                voiceMode = "whatsapp"
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    speak("Who do you wanna call")
+                }, 200)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    startVoiceCommand()
+                }, 1200)
+            }
+
+
+            text.contains("call") -> {
+
+                voiceMode = "call"
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    speak(" Who do you want to call ")
+                },300)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    startVoiceCommand()
+                },300)
+            }
+
+            text.contains("youtube") || text.contains("play video") -> {
+
+                voiceMode = "youtube"
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    speak("which YouTube video you want to play")
+                },200)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    startVoiceCommand()
+                },300)
+            }
+
+            else -> {
+
+                speak("Command not recognized")
+            }
+        }
+    }
+
+    // Call contact function
+
+    private  fun  callContact (name: String?){
+
+        if (name == null || name.isEmpty()){
+            speak("Contact name not detected")
+            return
+        }
+
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.READ_CONTACTS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.READ_CONTACTS),1
+            )
+
+            speak("Please allow contacts permission")
+            return
+        }
+
+        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+
+        val cursor = contentResolver.query(
+            uri,
+            null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+            arrayOf("%$name%"),null
+        )
+        if (cursor != null && cursor.moveToFirst()) {
+
+            val numberIndex =
+                cursor.getColumnIndex(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+            val phoneNumber = cursor.getString(numberIndex)
+
+            val intent = Intent(Intent.ACTION_CALL)
+
+            intent.data = Uri.parse("tel:$phoneNumber")
+
+            startActivity(intent)
+
+            speak("Calling $name")
+
+            cursor.close()
+
+        } else {
+
+            speak("Contact not found ")
+        }
+    }
+
+    //WhatsApp call function
+
+    private fun  callWhatsApp(name: String?){
+
+        if (name == null || name.isEmpty()) {
+            speak("Contact name not detected")
+            return
+        }
+
+        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+
+        val cursor = contentResolver.query(
+            uri,
+            null,
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME}   LIKE ?",
+            arrayOf("%$name%"),
+            null
+        )
+
+        if (cursor != null && cursor.moveToFirst()) {
+
+            val numberIndex = cursor.getColumnIndex(
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            )
+
+            val phoneNumber = cursor.getString(numberIndex).replace(" ", "").replace("-","")
+
+            val cleanNumber = phoneNumber.replace("+","")
+
+            val intent = Intent(Intent.ACTION_VIEW)
+
+            intent.data = Uri.parse("https://wa.me/$cleanNumber")
+
+            intent.setPackage("com.whatsapp")
+
+            startActivity(intent)
+
+            speak("Opening WhatsApp call for $name")
+
+            cursor.close()
+        } else {
+            speak("Contact not found")
+        }
+    }
+
+    // YouTube Search Function
+
+    private  fun  searchYoutuve( query: String?){
+
+        if (query == null) return
+
+        val intent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("https://www.youtube.com/results?search_query=$query")
+        )
+
+        intent.setPackage("com.google.android.youtube")
+
+        startActivity(intent)
+
+        speak("Playing $query on YouTube")
     }
 
     // Language Translation code
@@ -374,17 +674,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun openNavigation(locationName: String){
 
+        speak("Navigating to $locationName")
+
         val uri = Uri.parse("google.navigation:q=$locationName")
 
         val intent = Intent(Intent.ACTION_VIEW, uri)
         intent.setPackage("com.google.android.apps.maps")
+
+        speak("Navigation started. To return , press the home button and reopen VisionAid ai")
 
         startActivity(intent)
     }
 
     private fun startListening(){
 
-        if (!allowListning) return // prevent restart
+        if (!allowListning) {
+            speak("listening not working on the . StartListening fun")
+            return
+        } // prevent restart
 
         isListening = true
         isDetectionEnabled = false
@@ -396,6 +703,16 @@ class MainActivity : AppCompatActivity() {
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
             RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
 
+        speechLauncher.launch(intent)
+
+        intent.putExtra(
+            RecognizerIntent.EXTRA_RESULTS, Locale.getDefault()
+        )
+
+        intent.putExtra(
+            RecognizerIntent.EXTRA_RESULTS,
+            "speak now"
+        )
         speechLauncher.launch(intent)
     }
 
@@ -492,7 +809,6 @@ class MainActivity : AppCompatActivity() {
                         val distanceCm = distance * 100
                         val currentTime = System.currentTimeMillis()
                         val distanceText = "${distanceCm.toInt()} centimeters away"
-
 
                           if (!isListening && speechEnabled && distanceCm <= alertDistance){
                             if (category.label != lastSpokenObject || currentTime - lastSpeakTime > 4000) {
