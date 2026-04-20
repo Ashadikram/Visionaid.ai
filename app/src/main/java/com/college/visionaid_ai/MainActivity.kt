@@ -9,6 +9,7 @@ import java.util.*
 
 import android.Manifest
 import android.adservices.adid.AdId
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -35,6 +36,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import java.io.ByteArrayOutputStream
 import android.graphics.*
+import android.hardware.biometrics.BiometricPrompt
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
@@ -65,7 +67,11 @@ import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.common.model.DownloadConditions
 
 import android.speech.SpeechRecognizer
+import android.speech.tts.UtteranceProgressListener
+import androidx.lifecycle.lifecycleScope
+import com.google.ai.client.generativeai.GenerativeModel
 import kotlinx.coroutines.flow.SharingCommand
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 
@@ -111,18 +117,58 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var speechLauncher: ActivityResultLauncher<Intent>
 
-    private fun speak(text: String){
+    private lateinit var locationHandler: location_handler
 
-        val params = Bundle()
-        val utteraneId = "tts1"
-        textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+    private lateinit var geminiHandler: gemini_Handler
+
+    private lateinit var calculatorHandler: CalculatorHandler
+    private lateinit var appOpenHandler: AppOpenHandler
+
+    private fun speak(text: String, onDone: (() -> Unit)? = null){
+
+        val utteranceId = "visionaid_tts"
+
+        textToSpeech.setOnUtteranceProgressListener(object  : UtteranceProgressListener() {
+
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                runOnUiThread {
+                    onDone?.invoke()
+                }
+            }
+
+            override fun onError(utteranceId: String?) {}
+        })
+        // If English selected, speak directly
+        if (selectedLanguageCode == TranslateLanguage.ENGLISH ) {
+            textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null,utteranceId)
+            return
+        }
+
+        // Translate text first
+        translator.translate(text)
+            .addOnSuccessListener { translatedText ->
+                textToSpeech.speak(translatedText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            }
+            .addOnFailureListener {
+                textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null,utteranceId)
+            }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-
         // UI btn code
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Translation code
+        initTranslator(selectedLanguageCode)
+
+        val btnLanguage = findViewById<ImageButton>(R.id.btnLanguage)
+
+        btnLanguage.setOnClickListener {
+            showLanguageDialog()
+        }
+
 
         val toggleSpeech = findViewById<SwitchMaterial>(R.id.toggleSpeech)
         val toggleVibration = findViewById<SwitchMaterial>(R.id.toggleVibration)
@@ -157,6 +203,14 @@ class MainActivity : AppCompatActivity() {
             bindCameraUseCase()
         }
 
+        //calculator function
+        calculatorHandler = CalculatorHandler()
+        appOpenHandler = AppOpenHandler(this)
+
+        //Gemini handling function
+
+        geminiHandler = gemini_Handler("AIzaSyAS3JccG_Mg8NPXWD5bqDVATfAc8dGIIag")
+
         // UI switch first ui to second ui
 
         val locationBtn = findViewById<ImageButton>(R.id.btnLocation)
@@ -179,6 +233,36 @@ class MainActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
+        //Mic Button
+
+        locationHandler = location_handler(this) { location ->
+
+            speak("Navigating yo $location")
+            openNavigation(location)
+        }
+
+        val micButton = findViewById<ImageButton>(R.id.btnMic)
+
+        micButton.setOnClickListener {
+            isListening = true
+            allowListning = true
+            speak("Voice command activated. where do you want to go")
+            locationHandler.startListening()
+        }
+
+        locationHandler.startListening()
+
+
+        // That's a map permission code
+        if (ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) != PackageManager.PERMISSION_GRANTED
+            ){
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),200
+            )
+        }
+
         //text to speech converter
 
         textToSpeech = TextToSpeech(this){
@@ -194,57 +278,30 @@ class MainActivity : AppCompatActivity() {
         ) { result ->
             if (result.resultCode == RESULT_OK){
 
-                isListening = false
-                isDetectionEnabled = true
-
                 val resultList = result.data?.getStringArrayListExtra(
                     RecognizerIntent.EXTRA_RESULTS
                 )
 
-                val locationName = resultList?.get(0)?.lowercase()
+                val locationName = resultList?.getOrNull(0)?.lowercase()
 
-                if (locationName != null){0
+                //val command = resultList?.getOrNull(0)
+
+                if (!locationName.isNullOrEmpty()){
                     speak("Navigating to $locationName")
                     openNavigation(locationName)
+
+             /*   if (command != null){
+                    speak("You said $command")
+                    askGemini(command)*/
+
                 } else {
-                    speak("Location not recognized")
+                    speak("Please say a destination")
                 }
             }
         }
-        getCurrentLocation()
+        //before there is map function
+        //getCurrentLocation()
 
-        val micButton = findViewById<ImageButton>(R.id.btnMic)
-
-        startListening()
-
-        //mic button manual control
-        micButton.setOnClickListener {
-            isListening = true
-            allowListning = true
-            speak("Voice command activated. please say your destination")
-
-            // Start automatic listening when app opens
-            startListening()
-        }
-
-        // That's a map permission code
-        if (ContextCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_FINE_LOCATION
-        ) != PackageManager.PERMISSION_GRANTED
-            ){
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),200
-            )
-        }
-
-        // Translation code
-        initTranslator(selectedLanguageCode)
-
-        val btnLanguage = findViewById<ImageButton>(R.id.btnLanguage)
-
-        btnLanguage.setOnClickListener {
-            showLanguageDialog()
-        }
 
         // Bot listening button
         btnbot = findViewById<ImageButton>(R.id.btnbot)
@@ -278,6 +335,11 @@ class MainActivity : AppCompatActivity() {
 
                 val command = result?.get(0)?.lowercase()
 
+                if (command == null) {
+                    speak("I didn't hear anything")
+                    return@registerForActivityResult
+                }
+                // Send command to the processor
                 processVoiceCommand(command)
             }
         }
@@ -289,11 +351,7 @@ class MainActivity : AppCompatActivity() {
         )== PackageManager.PERMISSION_GRANTED
         ) {
             startCamera()
-        }
-
-        /*if (allPermissionGranted()) {
-            startCamera()
-        }*/ else {
+        } else {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
         }
 
@@ -302,9 +360,7 @@ class MainActivity : AppCompatActivity() {
         objectDetector = ObjectDetector.createFromFileAndOptions(
             this, "efficientdet_lite1.tflite", options
         )
-
     }
-
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
@@ -339,16 +395,28 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchTouchEvent(ev)
     }
 
+    //gemini function
+    private fun askGemini(prompt: String){
+
+        lifecycleScope.launch {
+
+            try {
+                speak("Thinking...")
+                val result = geminiHandler.ask(prompt)
+                Log.d("Gemini", "Response: $result")
+                speak(result)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                speak("Error while using Ai")
+            }
+        }
+    }
+
     // Voice Listening Function
 
     private fun startVoiceCommand(){
 
         allowListning = true
-
-        if(!allowListning){
-            speak("Listening is not working")
-            return
-        }
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
 
@@ -372,7 +440,6 @@ class MainActivity : AppCompatActivity() {
     // Voice Command process
 
     private fun processVoiceCommand(command: String?) {
-
 
         if (command == null) {
             speak("command not recognized")
@@ -413,9 +480,29 @@ class MainActivity : AppCompatActivity() {
 
             voiceMode = "normal"
 
-            searchYoutuve(text)
+            searchYoutube(text)
 
             return
+
+        // step 4 : if user wanna set location
+        if (voiceMode == "location" && text.contains("map")){
+
+            voiceMode = "normal"
+            val place = text
+                .replace("navigate to","")
+                .replace("location","")
+                .replace("map","")
+            openNavigation(place)
+            return
+             }
+        // step 5 : if user wanna use calculation
+
+        if (voiceMode == "sara" && text.contains("sarah")){
+            voiceMode = "normal"
+            val cleand = text
+                .replace("sara","").replace("sarah","").trim()
+            askGemini(cleand)
+        }
         }
 
         when {
@@ -425,7 +512,7 @@ class MainActivity : AppCompatActivity() {
                 voiceMode = "whatsapp"
 
                 Handler(Looper.getMainLooper()).postDelayed({
-                    speak("Who do you wanna call")
+                    speak("Who do you wanna call on whatsapp")
                 }, 200)
 
                 Handler(Looper.getMainLooper()).postDelayed({
@@ -438,31 +525,75 @@ class MainActivity : AppCompatActivity() {
 
                 voiceMode = "call"
 
-                Handler(Looper.getMainLooper()).postDelayed({
-                    speak(" Who do you want to call ")
-                },300)
-
-                Handler(Looper.getMainLooper()).postDelayed({
-                    startVoiceCommand()
-                },300)
+                speak(" Who do you want to call ")
+                startVoiceCommand()
             }
 
             text.contains("youtube") || text.contains("play video") -> {
 
                 voiceMode = "youtube"
 
-                Handler(Looper.getMainLooper()).postDelayed({
-                    speak("which YouTube video you want to play")
-                },200)
+                speak("which YouTube video you wanna to watch")
+                startVoiceCommand()
+            }
 
-                Handler(Looper.getMainLooper()).postDelayed({
-                    startVoiceCommand()
-                },300)
+            text.contains("location") || text.contains("map") || text.contains("set location") ->{
+
+                val place = text
+                    .replace("location","")
+                    .replace("map","")
+                    .replace("set location","")
+
+                speak("Navigating to $place")
+                //startListening()
+                openNavigation(place)
+            }
+
+            text.contains("calculator") -> {
+                val result = appOpenHandler.openCalculator()
+                speak(result)
+                return
+            }
+
+            text.contains("calculate") || text.contains("what is") || text.contains("sara what is") -> {
+                val result = calculatorHandler.calculate(text)
+                speak(result)
+                return
+            }
+
+            text.contains("google") -> {
+                val query = text.replace("google","").trim()
+                searchOnGoogle(query)
+                return
+            }
+
+            text.startsWith("open")  -> {
+                val appName = text.replace("open", "").trim()
+                openAnyApp(appName)
+                return
+            }
+
+            text.contains("sara") || text.contains("sarah") || text.contains("hey") || text.contains("hello")->{
+
+                val cleaned = text
+                    .replace("sara","")
+                    .replace("sarah","")
+                    .replace("hey","")
+                    .replace("hello","").trim()
+                if (cleaned.isNotEmpty()) {
+                    askGemini(cleaned)
+                } else {
+                    speak("Yes, how can i help you")
+                }
+                speak("hello...")
+               // askGemini(text)
+                startVoiceCommand()
             }
 
             else -> {
-
-                speak("Command not recognized")
+                searchOnGoogle(text)
+                //askGemini(text)
+                //speak("Command not recognized tho you missed something")
             }
         }
     }
@@ -567,7 +698,7 @@ class MainActivity : AppCompatActivity() {
 
     // YouTube Search Function
 
-    private  fun  searchYoutuve( query: String?){
+    private  fun  searchYoutube( query: String?){
 
         if (query == null) return
 
@@ -581,6 +712,126 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
 
         speak("Playing $query on YouTube")
+    }
+
+    private fun searchOnGoogle(query: String) {
+
+        if (query.isEmpty()) {
+            speak("what do you want to search?")
+            return
+        }
+        //if (query == null) return
+
+        try {
+            val encodedQuery = Uri.encode(query)
+
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://www.google.com/search?q=$encodedQuery")
+            )
+            startActivity(intent)
+            speak("Search Google for $query")
+        } catch (e: Exception) {
+        speak("Unable to search")
+        }
+    }
+/*
+    private fun openAnyApp(appName: String) {
+
+        val packageName = getPackageNameFromAppName(appName)
+
+        if (packageName.isEmpty()) {
+            speak("App not found")
+            return
+        }
+        try {
+            val packageManager = packageManager
+
+            val intent = packageManager.getLaunchIntentForPackage(
+                getPackageNameFromAppName(appName)
+            )
+
+            if (intent != null) {
+                startActivity(intent)
+                speak("opening $appName")
+            } else {
+                // if app not found -> play Store
+                speak("App not found , searching on play Store")
+
+            }
+        } catch (e: Exception) {
+            speak("Unable to open $appName")
+            e.printStackTrace()
+        }
+    } */
+
+    private fun openAnyApp(appName: String) {
+
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN, null)
+        intent.addCategory(Intent.CATEGORY_LAUNCHER)
+
+        val apps = pm.queryIntentActivities(intent, 0)
+
+        for (app in apps) {
+            val name = app.loadLabel(pm).toString()
+
+            val cleanAppName = appName
+                .replace("open","")
+                .replace("app","")
+                .replace("application","")
+                .replace("please","").trim()
+
+            if (name.lowercase().contains(cleanAppName.lowercase())) {
+
+                try {
+                    val launchIntent = Intent(Intent.ACTION_MAIN)
+                    launchIntent.addCategory(Intent.CATEGORY_LAUNCHER)
+                    launchIntent.component = ComponentName(
+                        app.activityInfo.packageName,
+                        app.activityInfo.name
+                    )
+                    startActivity(launchIntent)
+                    speak("Opening $name sir")
+                    return
+                } catch (e: Exception) {
+                    speak("new kind of problem is come")
+                    e.printStackTrace()
+                }
+            }
+        }
+        // If not found Search on playStore
+        speak("App not found, searching on Play store")
+
+        try {
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("market://search?q=$appName")
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://play.google.com/store/search?q=$appName")
+            )
+            startActivity(intent)
+        }
+    }
+
+    private fun getPackageNameFromAppName(appName: String): String {
+
+        val pm = packageManager
+        val apps = pm.getInstalledApplications(0)
+
+        for (app in apps) {
+            val name = pm.getApplicationLabel(app).toString()
+
+            if (name.lowercase().contains(appName.lowercase())) {
+                return  app.packageName
+            }
+        }
+
+        return "" // not Found
     }
 
     // Language Translation code
@@ -621,23 +872,32 @@ class MainActivity : AppCompatActivity() {
                     1 -> {
                         selectedLanguageCode = TranslateLanguage.HINDI
                         textToSpeech.language = Locale("HINDI","IN")
+                        initTranslator(selectedLanguageCode)
                     }
 
                     2 -> {
                         selectedLanguageCode = TranslateLanguage.URDU
                         textToSpeech.language = Locale("ur", "PK")
+                        initTranslator(selectedLanguageCode)
+
                     }
                     3 -> {
                         selectedLanguageCode = TranslateLanguage.GERMAN
                         textToSpeech.language = Locale.GERMANY
+                        initTranslator(selectedLanguageCode)
+
                     }
                     4 -> {
                         selectedLanguageCode = TranslateLanguage.JAPANESE
                         textToSpeech.language = Locale.JAPAN
+                        initTranslator(selectedLanguageCode)
+
                     }
                     5 -> {
                         selectedLanguageCode = TranslateLanguage.CHINESE
                         textToSpeech.language = Locale.CHINA
+                        initTranslator(selectedLanguageCode)
+
                     }
                 }
 
@@ -668,7 +928,7 @@ class MainActivity : AppCompatActivity() {
             val lat = location.latitude
             val lng = location.longitude
 
-            speak("Your current location is latitude $lat and longitude $lng")
+           // speak("Your current location is latitude $lat and longitude $lng")
         }
     }
 
@@ -689,7 +949,7 @@ class MainActivity : AppCompatActivity() {
     private fun startListening(){
 
         if (!allowListning) {
-            speak("listening not working on the . StartListening fun")
+            speak("listening not working on this device")
             return
         } // prevent restart
 
@@ -698,19 +958,19 @@ class MainActivity : AppCompatActivity() {
 
         textToSpeech.stop()
 
-
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
 
-        speechLauncher.launch(intent)
+        intent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        )
 
         intent.putExtra(
             RecognizerIntent.EXTRA_RESULTS, Locale.getDefault()
         )
 
         intent.putExtra(
-            RecognizerIntent.EXTRA_RESULTS,
+            RecognizerIntent.EXTRA_PROMPT, //EXTRA_RESULTS
             "speak now"
         )
         speechLauncher.launch(intent)
@@ -720,6 +980,8 @@ class MainActivity : AppCompatActivity() {
         isListening = false
         isDetectionEnabled = true
     }
+
+    // Vibration Warning Function
 
     private fun vibrateWarning(){
 
@@ -767,6 +1029,8 @@ class MainActivity : AppCompatActivity() {
         val imageByte = out.toByteArray()
         return BitmapFactory.decodeByteArray(imageByte, 0, imageByte.size)
     }
+
+    // Starting a camera for object detection
 
     private fun startCamera() {
 
